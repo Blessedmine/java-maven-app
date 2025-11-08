@@ -25,11 +25,6 @@ jobs:
       - name: Build with Maven
         run: mvn -B clean package --file pom.xml
 
-
-      - name: Build with Maven
-        run: mvn -B clean package --file pom.xml
-
-
       - name: Build Docker Image
         run: docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/java-maven-app:${{ github.sha }} .
 
