@@ -2,34 +2,24 @@ name: Java Maven CI
 
 on:
   push:
-    branches:
-      - main
-    paths-ignore:
-      - 'manifest/**'
+    branches: [main]
   pull_request:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
-env:
-  IMAGE_NAME: java-maven-app
-  JAVA_VERSION: 17
-
 jobs:
-  build-and-push:
+  build:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup JDK 17
         uses: actions/setup-java@v4
         with:
-          java-version: 17
           distribution: 'temurin'
+          java-version: '17'
           cache: 'maven'
 
       - name: Build with Maven
