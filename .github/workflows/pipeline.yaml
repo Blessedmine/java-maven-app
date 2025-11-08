@@ -1,0 +1,46 @@
+name: Java Maven CI
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'manifest/**'  # Ignores all files under manifest/ on push to main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: java-maven-app
+  JAVA_VERSION: 17
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: 17
+          cache: 'maven'
+
+      - name: Build with Maven
+        run: mvn -B clean package --file pom.xml
+
+
+      - name: Build Docker Image
+        run: docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/java-maven-app:${{ github.sha }} .
+
+      - name: Log in to DockerHub
+        run: echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+
+      - name: Push Docker image to DockerHub
+        run: docker push ${{ secrets.DOCKERHUB_USERNAME }}/java-maven-app:${{ github.sha }}
+
