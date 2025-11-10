@@ -17,14 +17,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Step 1: Checkout source code
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
-      # Step 2: Set up JDK
       - name: Set up JDK ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
         with:
@@ -32,13 +30,15 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           cache: 'maven'
 
-      # Step 3: Verify files (useful for debugging)
-      - name: List repository files
-        run: ls -la
-
-      # Step 4: Build with Maven
       - name: Build with Maven
         run: mvn -B clean package --file pom.xml
+
+      #  Upload JAR as artifact
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-app
+          path: target/*.jar
 
   docker:
     name: Build & Push Docker Image
@@ -48,6 +48,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      #Download the JAR built in the previous job
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: java-app
+          path: target
 
       - name: Log in to DockerHub
         env:
@@ -60,7 +67,8 @@ jobs:
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
-          docker build -t $DOCKERHUB_USERNAME/java-maven-app:${{ github.sha }} -t $DOCKERHUB_USERNAME/java-maven-app:latest .
+          docker build -t $DOCKERHUB_USERNAME/java-maven-app:${{ github.sha }} \
+                       -t $DOCKERHUB_USERNAME/java-maven-app:latest .
 
       - name: Push Docker image
         env:
