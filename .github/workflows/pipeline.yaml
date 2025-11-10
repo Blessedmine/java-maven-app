@@ -32,7 +32,7 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           cache: 'maven'
 
-      # Step 3: Verify files (useful for debugging)
+      # Step 3: Verify files (Optional useful for debugging)
       - name: List repository files
         run: ls -la
 
