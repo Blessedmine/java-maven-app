@@ -1,15 +1,22 @@
-name: Java Maven CI
+name: Java Maven CICD
 
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
-  workflow_dispatch:
+    paths-ignore:
+      - 'manifest/**' #ignore changes to manifest files to prevent loop
 
 env:
   IMAGE_NAME: java-maven-app
   JAVA_VERSION: 17
+  PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+  DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+  ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+  ARGOCD_USERNAME: ${{ secrets.ARGOCD_USERNAME }}
+  ARGOCD_PASSWORD: ${{ secrets.ARGOCD_PASSWORD }}
+  GIT_USERNAME: ${{ secrets.GIT_USERNAME }}
+  GIT_EMAIL: ${{ secrets.GIT_EMAIL }}
 
 jobs:
   build:
@@ -57,22 +64,74 @@ jobs:
           path: target
 
       - name: Log in to DockerHub
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+
         run: |
           echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
 
       - name: Build Docker image
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+
         run: |
           docker build -t $DOCKERHUB_USERNAME/java-maven-app:${{ github.sha }} \
                        -t $DOCKERHUB_USERNAME/java-maven-app:latest .
 
       - name: Push Docker image
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
           docker push $DOCKERHUB_USERNAME/java-maven-app:${{ github.sha }}
           docker push $DOCKERHUB_USERNAME/java-maven-app:latest
+
+  deploy:
+    name: Deploy with ArgoCD
+    needs: docker
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          fetch-depth: 0  # get all history of all branches and tags
+
+      - name: Install Kubectl
+        run: |
+          curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.30.7/2024-12-12/bin/linux/amd64/kubectl
+          chmod +x ./kubectl
+          sudo mv ./kubectl /usr/local/bin/kubectl
+
+      - name: Install ArgoCD CLI
+        run: |
+          curl -sSL -o argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          chmod +x argocd
+          sudo mv argocd /usr/local/bin/argocd
+
+      - name: Login to ArgoCD
+        run: |
+          argocd login $ARGOCD_SERVER \
+              --username $ARGOCD_USERNAME \
+              --password $ARGOCD_PASSWORD \
+              --insecure
+
+      - name: Update deployment manifest
+        run: |
+          git config user.name "$GIT_USERNAME"
+          git config user.email "$GIT_EMAIL"
+          git fetch origin
+          git checkout main
+          git pull origin main
+          cat manifest/deployment.yaml
+          sed -i "s+${DOCKERHUB_USERNAME}/java-maven-app.*+${DOCKERHUB_USERNAME}/java-maven-app:${{ github.sha }}+g" manifest/deployment.yaml
+          cat manifest/deployment.yaml
+
+      - name: Commit and Push the deployment file
+        run: |
+          git config user.name "$GIT_USERNAME"
+          git config user.email "$GIT_EMAIL"
+          git remote set-url origin https://$GIT_USERNAME:$PERSONAL_ACCESS_TOKEN@github.com/${{ github.repository }}.git
+          git fetch origin
+          git checkout main
+          git pull origin main
+          git add manifest/deployment.yaml
+          git commit -m "Update image to java-maven-app:${{ github.sha }}" || echo "No changes to commit" 
+          git push origin main
+
+      - name: sync ArgoCD
+        run: argocd app sync java-maven-app
