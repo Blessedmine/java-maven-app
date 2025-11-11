@@ -1,1 +1,81 @@
-.idea
+# ==========================================
+# 🧰 General
+# ==========================================
+.DS_Store
+Thumbs.db
+*.log
+
+# ==========================================
+# ☕ Java / Maven
+# ==========================================
+target/
+*.class
+*.jar
+*.war
+*.ear
+*.iml
+.idea/
+*.project
+*.classpath
+.settings/
+.mvn/
+!/.mvn/wrapper/maven-wrapper.jar  # keep Maven wrapper jar
+
+# ==========================================
+# 🐳 Docker
+# ==========================================
+*.pid
+*.tar
+*.img
+*.gz
+*.bak
+docker-compose.override.yml
+docker-compose.local.yml
+
+# ==========================================
+# ☁️ Terraform
+# ==========================================
+# Local state and cache
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+terraform.tfvars
+*.backup
+
+# Ignore local tfvars with secrets
+*.auto.tfvars
+
+# ==========================================
+# 🔐 Secrets / Credentials
+# ==========================================
+.env
+*.key
+*.pem
+*.p12
+*.crt
+*.csr
+*.der
+
+# ==========================================
+# 🤖 GitHub Actions / CI Artifacts
+# ==========================================
+# Logs and artifacts from workflows
+*.artifact.zip
+*.artifact.tar.gz
+workflow-temp/
+actions-runner/
+node_modules/
+dist/
+
+# ==========================================
+# 🧹 System Files
+# ==========================================
+*.tmp
+*.swp
+*~
