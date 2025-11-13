@@ -111,7 +111,7 @@ jobs:
 
       - name: Login to ArgoCD
         run: |
-          argocd login --username admin --password ${{ env.ARGOCD_PASSWORD }} --insecure --grpc-web
+          argocd login ${{ secrets.ARGOCD_SERVER }} --username admin --password ${{ secrets.ARGOCD_PASSWORD }} --insecure --grpc-web
 
       - name: Update deployment manifest
         run: |
