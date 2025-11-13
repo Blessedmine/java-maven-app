@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths-ignore:
-      - 'manifest/**' #ignore changes to manifest files to prevent loop
+      - 'manifest/**' #ignore changes to manifest files to prevent loop.
 
 env:
   IMAGE_NAME: java-maven-app
@@ -40,7 +40,7 @@ jobs:
       - name: Build with Maven
         run: mvn -B clean package --file pom.xml
 
-      #  Upload JAR as artifact.
+      #  Upload JAR as artifact
       - name: Upload JAR artifact
         uses: actions/upload-artifact@v4
         with:
