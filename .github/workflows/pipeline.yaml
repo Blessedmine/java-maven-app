@@ -1,20 +1,19 @@
-name: Java Maven CI/CD
+name: Java Maven CICD
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
     paths-ignore:
-      - 'manifest/**' #ignore changes to manifest files to prevent loop.
+      - 'manifest/**'
 
 env:
   IMAGE_NAME: java-maven-app
   JAVA_VERSION: 17
-  PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
   DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
   ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
   ARGOCD_USERNAME: ${{ secrets.ARGOCD_USERNAME }}
-  ARGOCD_PASSWORD: ${{ secrets.ARGOCD_PASSWORD }}
   GIT_USERNAME: ${{ secrets.GIT_USERNAME }}
   GIT_EMAIL: ${{ secrets.GIT_EMAIL }}
 
@@ -22,7 +21,6 @@ jobs:
   build:
     name: Build & Test Java App
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -40,7 +38,6 @@ jobs:
       - name: Build with Maven
         run: mvn -B clean package --file pom.xml
 
-      #  Upload JAR as artifact
       - name: Upload JAR artifact
         uses: actions/upload-artifact@v4
         with:
@@ -51,12 +48,10 @@ jobs:
     name: Build & Push Docker Image
     runs-on: ubuntu-latest
     needs: build
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      #Download the JAR built in the previous job.
       - name: Download JAR artifact
         uses: actions/download-artifact@v4
         with:
@@ -64,15 +59,13 @@ jobs:
           path: target
 
       - name: Log in to DockerHub
-
         run: |
           echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
 
       - name: Build Docker image
-
         run: |
           docker build -t $DOCKERHUB_USERNAME/java-maven-app:${{ github.sha }} \
-                       -t $DOCKERHUB_USERNAME/java-maven-app:latest .
+            -t $DOCKERHUB_USERNAME/java-maven-app:latest .
 
       - name: Push Docker image
         run: |
@@ -83,19 +76,24 @@ jobs:
     name: Deploy with ArgoCD
     needs: docker
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
-          fetch-depth: 0  # get all history of all branches and tags.
+          fetch-depth: 0
 
-      - name: Install Kubectl
+      - name: Install Minikube
         run: |
-          curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.30.7/2024-12-12/bin/linux/amd64/kubectl
-          chmod +x ./kubectl
-          sudo mv ./kubectl /usr/local/bin/kubectl
+          curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+          sudo install minikube-linux-amd64 /usr/local/bin/minikube
+
+      - name: Start Minikube
+        run: minikube start
+
+      - name: Configure kubectl
+        run: |
+          kubectl config use-context minikube
 
       - name: Install ArgoCD CLI
         run: |
@@ -105,13 +103,12 @@ jobs:
 
       - name: Get ArgoCD password
         run: |
-          set -x
           password=$(kubectl get secret argocd-initial-admin-secret -n argocd -o jsonpath="{.data.password}" | base64 -d)
           echo "ARGOCD_PASSWORD=$password" >> $GITHUB_ENV
 
       - name: Login to ArgoCD
         run: |
-          argocd login ${{ secrets.ARGOCD_SERVER }} --username admin --password ${{ secrets.ARGOCD_PASSWORD }} --insecure --grpc-web
+          argocd login ${{ env.ARGOCD_SERVER }} --username ${{ env.ARGOCD_USERNAME }} --password ${{ env.ARGOCD_PASSWORD }} --insecure --grpc-web
 
       - name: Update deployment manifest
         run: |
@@ -120,21 +117,12 @@ jobs:
           git fetch origin
           git checkout main
           git pull origin main
-          cat manifest/deployment.yaml
           sed -i "s+${DOCKERHUB_USERNAME}/java-maven-app.*+${DOCKERHUB_USERNAME}/java-maven-app:${{ github.sha }}+g" manifest/deployment.yaml
-          cat manifest/deployment.yaml
+          git add manifest/deployment.yaml
+          git commit -m "Update image to java-maven-app:${{ github.sha }}" || echo "No changes to commit"
 
       - name: Commit and Push the deployment file
         run: |
-          git config user.name "$GIT_USERNAME"
-          git config user.email "$GIT_EMAIL"
-          git remote set-url origin https://$GIT_USERNAME:$PERSONAL_ACCESS_TOKEN@github.com/${{ github.repository }}.git
-          git fetch origin
-          git checkout main
-          git pull origin main
-          git add manifest/deployment.yaml
-          pwd
-          git commit -m "Update image to java-maven-app:${{ github.sha }}" || echo "No changes to commit" 
           git push origin main
 
       - name: sync ArgoCD
