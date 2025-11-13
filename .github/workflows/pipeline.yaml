@@ -105,6 +105,7 @@ jobs:
 
       - name: Get ArgoCD password
         run: |
+          set -x
           password=$(kubectl get secret argocd-initial-admin-secret -n argocd -o jsonpath="{.data.password}" | base64 -d)
           echo "ARGOCD_PASSWORD=$password" >> $GITHUB_ENV
 
