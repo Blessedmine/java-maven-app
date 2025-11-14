@@ -1,4 +1,4 @@
-name: Java Maven CI/CD
+name: Java Maven CI
 
 on:
   push:
@@ -124,7 +124,8 @@ jobs:
 
       - name: Expose ArgoCD server
         run: |
-          kubectl expose deployment argocd-server -n argocd --type=NodePort --port=8080 --target-port=8080 --node-port=30080
+          kubectl expose deployment argocd-server -n argocd --type=NodePort --port=8080 --target-port=8080
+          kubectl patch svc argocd-server -n argocd -p '{"spec": {"ports": [{"nodePort": 30080, "port": 8080, "targetPort": 8080}]}}'
 
       - name: Get NodePort IP
         run: |
@@ -152,4 +153,3 @@ jobs:
 
       - name: sync ArgoCD
         run: argocd app sync java-maven-app
-
