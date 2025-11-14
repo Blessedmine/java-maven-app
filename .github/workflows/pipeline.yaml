@@ -117,8 +117,8 @@ jobs:
 
       - name: Debug ArgoCD connection
         run: |
-          curl -v ${{ env.ARGOCD_SERVER }}
-          argocd login ${{ env.ARGOCD_SERVER }} --username ${{ env.ARGOCD_USERNAME }} --password ${{ env.ARGOCD_PASSWORD }} --insecure --grpc-web
+          curl -v --connect-timeout 300 ${ARGOCD_SERVER}
+          argocd login ${ARGOCD_SERVER} --username ${ARGOCD_USERNAME} --password ${ARGOCD_PASSWORD} --insecure --grpc-webe --grpc-web
 
       - name: Update deployment manifest
         run: |
