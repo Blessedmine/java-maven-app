@@ -122,10 +122,9 @@ jobs:
           chmod +x argocd
           sudo mv argocd /usr/local/bin/argocd
 
-      - name: Expose ArgoCD server
+      - name: Patch ArgoCD server service
         run: |
-          kubectl expose deployment argocd-server -n argocd --type=NodePort --port=8080 --target-port=8080
-          kubectl patch svc argocd-server -n argocd -p '{"spec": {"ports": [{"nodePort": 30080, "port": 8080, "targetPort": 8080}]}}'
+          kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "NodePort", "ports": [{"nodePort": 30080, "port": 8080, "targetPort": 8080}]}}'
 
       - name: Get NodePort IP
         run: |
