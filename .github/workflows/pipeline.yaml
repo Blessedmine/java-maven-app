@@ -115,9 +115,10 @@ jobs:
           chmod +x argocd
           sudo mv argocd /usr/local/bin/argocd
 
-      - name: Login to ArgoCD
+      - name: Debug ArgoCD connection
         run: |
-          argocd login ${{ env.ARGOCD_SERVER }} --username admin --password ${{ env.ARGOCD_PASSWORD }} --insecure --grpc-web
+          curl -v ${{ env.ARGOCD_SERVER }}
+          argocd login ${{ env.ARGOCD_SERVER }} --username ${{ env.ARGOCD_USERNAME }} --password ${{ env.ARGOCD_PASSWORD }} --insecure --grpc-web
 
       - name: Update deployment manifest
         run: |
