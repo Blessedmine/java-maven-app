@@ -1,4 +1,4 @@
-name: Java Maven CICD
+name: Java Maven CI/CD
 
 on:
   push:
@@ -95,20 +95,29 @@ jobs:
         run: |
           kubectl config use-context minikube
 
-      - name: Install ArgoCD CLI
+      - name: Install ArgoCD
         run: |
-          curl -sSL -o argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
-          chmod +x argocd
-          sudo mv argocd /usr/local/bin/argocd
+          kubectl create namespace argocd
+          kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+      - name: Wait for ArgoCD to be ready
+        run: |
+          kubectl wait -n argocd deployment argocd-server --for condition=Available=True --timeout=5m
 
       - name: Get ArgoCD password
         run: |
           password=$(kubectl get secret argocd-initial-admin-secret -n argocd -o jsonpath="{.data.password}" | base64 -d)
           echo "ARGOCD_PASSWORD=$password" >> $GITHUB_ENV
 
+      - name: Install ArgoCD CLI
+        run: |
+          curl -sSL -o argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          chmod +x argocd
+          sudo mv argocd /usr/local/bin/argocd
+
       - name: Login to ArgoCD
         run: |
-          argocd login ${{ env.ARGOCD_SERVER }} --username ${{ env.ARGOCD_USERNAME }} --password ${{ env.ARGOCD_PASSWORD }} --insecure --grpc-web
+          argocd login ${{ env.ARGOCD_SERVER }} --username admin --password ${{ env.ARGOCD_PASSWORD }} --insecure --grpc-web
 
       - name: Update deployment manifest
         run: |
