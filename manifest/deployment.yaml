@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: java-maven-app
-          image: blessedmine/java-maven-app:v1
+          image: blessedmine/java-maven-app:dd43f4858bb53b94684217f9cb7ab73c431c0ead
           ports:
             - containerPort: 80
           resources:
