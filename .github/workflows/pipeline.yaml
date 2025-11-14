@@ -91,6 +91,12 @@ jobs:
       - name: Start Minikube
         run: minikube start
 
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+
       - name: Configure kubectl
         run: |
           kubectl config use-context minikube
@@ -99,6 +105,20 @@ jobs:
         run: |
           kubectl create namespace argocd
           kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+      - name: Expose ArgoCD server
+        run: |
+          kubectl expose deployment argocd-server -n argocd --type=NodePort --port=8080
+
+      - name: Get NodePort IP
+        run: |
+          NODE_PORT=$(kubectl get svc -n argocd argocd-server -o jsonpath='{.spec.ports[0].nodePort}')
+          echo "ARGOCD_SERVER=http://$(minikube ip):$NODE_PORT" >> $GITHUB_ENV
+
+      - name: Debug ArgoCD connection
+        run: |
+          curl -v --connect-timeout 300 ${ARGOCD_SERVER}
+          argocd login ${ARGOCD_SERVER} --username ${ARGOCD_USERNAME} --password ${ARGOCD_PASSWORD} --insecure --grpc-web
 
       - name: Wait for ArgoCD to be ready
         run: |
