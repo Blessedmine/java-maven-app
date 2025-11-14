@@ -12,8 +12,9 @@ env:
   JAVA_VERSION: 17
   DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
   DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-  ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+  ARGOCD_SERVER:
   ARGOCD_USERNAME: ${{ secrets.ARGOCD_USERNAME }}
+  ARGOCD_PASSWORD:
   GIT_USERNAME: ${{ secrets.GIT_USERNAME }}
   GIT_EMAIL: ${{ secrets.GIT_EMAIL }}
 
@@ -106,20 +107,6 @@ jobs:
           kubectl create namespace argocd
           kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 
-      - name: Expose ArgoCD server
-        run: |
-          kubectl expose deployment argocd-server -n argocd --type=NodePort --port=8080
-
-      - name: Get NodePort IP
-        run: |
-          NODE_PORT=$(kubectl get svc -n argocd argocd-server -o jsonpath='{.spec.ports[0].nodePort}')
-          echo "ARGOCD_SERVER=http://$(minikube ip):$NODE_PORT" >> $GITHUB_ENV
-
-      - name: Debug ArgoCD connection
-        run: |
-          curl -v --connect-timeout 300 ${ARGOCD_SERVER}
-          argocd login ${ARGOCD_SERVER} --username ${ARGOCD_USERNAME} --password ${ARGOCD_PASSWORD} --insecure --grpc-web
-
       - name: Wait for ArgoCD to be ready
         run: |
           kubectl wait -n argocd deployment argocd-server --for condition=Available=True --timeout=5m
@@ -135,10 +122,15 @@ jobs:
           chmod +x argocd
           sudo mv argocd /usr/local/bin/argocd
 
+      - name: Get NodePort IP
+        run: |
+          NODE_PORT=$(kubectl get svc -n argocd argocd-server -o jsonpath='{.spec.ports[0].nodePort}')
+          echo "ARGOCD_SERVER=http://$(minikube ip):$NODE_PORT" >> $GITHUB_ENV
+
       - name: Debug ArgoCD connection
         run: |
           curl -v --connect-timeout 300 ${ARGOCD_SERVER}
-          argocd login ${ARGOCD_SERVER} --username ${ARGOCD_USERNAME} --password ${ARGOCD_PASSWORD} --insecure --grpc-webe --grpc-web
+          argocd login ${ARGOCD_SERVER} --username ${ARGOCD_USERNAME} --password ${ARGOCD_PASSWORD} --insecure --grpc-web
 
       - name: Update deployment manifest
         run: |
