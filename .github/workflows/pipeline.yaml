@@ -122,10 +122,13 @@ jobs:
           chmod +x argocd
           sudo mv argocd /usr/local/bin/argocd
 
+      - name: Expose ArgoCD server
+        run: |
+          kubectl expose deployment argocd-server -n argocd --type=NodePort --port=8080 --node-port=30080
+
       - name: Get NodePort IP
         run: |
-          NODE_PORT=$(kubectl get svc -n argocd argocd-server -o jsonpath='{.spec.ports[0].nodePort}')
-          echo "ARGOCD_SERVER=http://$(minikube ip):$NODE_PORT" >> $GITHUB_ENV
+          echo "ARGOCD_SERVER=http://$(minikube ip):30080" >> $GITHUB_ENV
 
       - name: Debug ArgoCD connection
         run: |
