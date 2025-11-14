@@ -1,4 +1,4 @@
-name: Java Maven CI
+name: Java Maven CI/CD
 
 on:
   push:
@@ -12,9 +12,7 @@ env:
   JAVA_VERSION: 17
   DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
   DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-  ARGOCD_SERVER:
   ARGOCD_USERNAME: ${{ secrets.ARGOCD_USERNAME }}
-  ARGOCD_PASSWORD:
   GIT_USERNAME: ${{ secrets.GIT_USERNAME }}
   GIT_EMAIL: ${{ secrets.GIT_EMAIL }}
 
@@ -74,11 +72,12 @@ jobs:
           docker push $DOCKERHUB_USERNAME/java-maven-app:latest
 
   deploy:
-    name: Deploy with ArgoCD
+    name: Deploy with ArgoCD (Minikube)
     needs: docker
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
-      - name: Checkout code
+      - name: Checkout code (for manifests)
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
@@ -90,7 +89,8 @@ jobs:
           sudo install minikube-linux-amd64 /usr/local/bin/minikube
 
       - name: Start Minikube
-        run: minikube start
+        run: |
+          minikube start --driver=docker
 
       - name: Install kubectl
         run: |
@@ -98,20 +98,21 @@ jobs:
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
 
-      - name: Configure kubectl
+      - name: Use minikube context
         run: |
           kubectl config use-context minikube
 
       - name: Install ArgoCD
         run: |
-          kubectl create namespace argocd
+          kubectl create namespace argocd || true
           kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 
-      - name: Wait for ArgoCD to be ready
+      - name: Wait for ArgoCD deployments to be ready
         run: |
-          kubectl wait -n argocd deployment argocd-server --for condition=Available=True --timeout=5m
+          kubectl wait -n argocd --for=condition=Available deployment --all --timeout=10m
 
-      - name: Get ArgoCD password
+      - name: Get ArgoCD admin password
+        id: get_pass
         run: |
           password=$(kubectl get secret argocd-initial-admin-secret -n argocd -o jsonpath="{.data.password}" | base64 -d)
           echo "ARGOCD_PASSWORD=$password" >> $GITHUB_ENV
@@ -122,33 +123,71 @@ jobs:
           chmod +x argocd
           sudo mv argocd /usr/local/bin/argocd
 
-      - name: Patch ArgoCD server service
+      - name: Patch ArgoCD server service to NodePort (safe merge)
         run: |
-          kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "NodePort", "ports": [{"nodePort": 30080, "port": 8080, "targetPort": 8080}]}}'
+          # Use merge patch so we don't wipe other ports. Ensure port 'https' exists and assign nodePort 30080
+          kubectl patch svc argocd-server -n argocd --type='merge' -p '{
+            "spec": {
+              "type": "NodePort",
+              "ports": [
+                {
+                  "name": "https",
+                  "nodePort": 30080,
+                  "port": 443,
+                  "targetPort": 8080
+                }
+              ]
+            }
+          }'
 
-      - name: Get NodePort IP
+      - name: Expose ArgoCD host and port for login
         run: |
-          echo "ARGOCD_SERVER=http://$(minikube ip):30080" >> $GITHUB_ENV
+          ARGOCD_HOST=$(minikube ip)
+          ARGOCD_PORT=30080
+          echo "ARGOCD_HOST=$ARGOCD_HOST" >> $GITHUB_ENV
+          echo "ARGOCD_PORT=$ARGOCD_PORT" >> $GITHUB_ENV
+          echo "ARGOCD_SERVER=${ARGOCD_HOST}:${ARGOCD_PORT}" >> $GITHUB_ENV
 
-      - name: Debug ArgoCD connection
+      - name: Wait for NodePort to be available
         run: |
-          curl -v --connect-timeout 300 ${ARGOCD_SERVER}
-          argocd login ${ARGOCD_SERVER} --username ${ARGOCD_USERNAME} --password ${ARGOCD_PASSWORD} --insecure --grpc-web
+          # wait until service responds on NodePort
+          for i in $(seq 1 30); do
+            curl -sSf "http://${{ env.ARGOCD_HOST }}:${{ env.ARGOCD_PORT }}/" && echo "argocd reachable" && exit 0 || sleep 5
+          done
+          echo "ArgoCD not reachable after timeout" && kubectl get svc -n argocd && exit 1
 
-      - name: Update deployment manifest
+      - name: Debug ArgoCD connection (curl)
+        run: |
+          echo "Testing http://${{ env.ARGOCD_HOST }}:${{ env.ARGOCD_PORT }}"
+          curl -v --connect-timeout 10 http://${{ env.ARGOCD_HOST }}:${{ env.ARGOCD_PORT }} || true
+
+      - name: Login to ArgoCD
+        env:
+          ARGOCD_USERNAME: ${{ env.ARGOCD_USERNAME }}
+          ARGOCD_PASSWORD: ${{ env.ARGOCD_PASSWORD }}
+        run: |
+          # Use the password output earlier
+          argocd login "${{ env.ARGOCD_HOST }}:${{ env.ARGOCD_PORT }}" \
+            --username "${{ secrets.ARGOCD_USERNAME }}" \
+            --password "${{ env.ARGOCD_PASSWORD }}" \
+            --insecure --grpc-web
+
+      - name: Update deployment manifest image tag
         run: |
           git config user.name "$GIT_USERNAME"
           git config user.email "$GIT_EMAIL"
           git fetch origin
           git checkout main
           git pull origin main
-          sed -i "s+${DOCKERHUB_USERNAME}/java-maven-app.*+${DOCKERHUB_USERNAME}/java-maven-app:${{ github.sha }}+g" manifest/deployment.yaml
+          # update image tag in manifest/deployment.yaml (adjust search if needed)
+          sed -i "s+image: .*java-maven-app.*+image: ${DOCKERHUB_USERNAME}/java-maven-app:${{ github.sha }}+g" manifest/deployment.yaml
           git add manifest/deployment.yaml
-          git commit -m "Update image to java-maven-app:${{ github.sha }}" || echo "No changes to commit"
+          git commit -m "chore: update image to java-maven-app:${{ github.sha }}" || echo "No changes to commit"
 
-      - name: Commit and Push the deployment file
+      - name: Push updated manifest
         run: |
           git push origin main
 
-      - name: sync ArgoCD
-        run: argocd app sync java-maven-app
+      - name: Sync ArgoCD application
+        run: |
+          argocd app sync java-maven-app || (argocd app get java-maven-app && exit 1)
