@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - main
-    paths-ignore:
-      - 'manifests/**'
 
 env:
   IMAGE_NAME: java-maven-app
@@ -13,10 +11,6 @@ env:
   MAVEN_OPTS: '-Dmaven.repo.local=$HOME/.m2/repository'
   K8S_NAMESPACE: 'default'
   ARGOCD_NAMESPACE: 'argocd'
-
-# Add this permissions section
-permissions:
-  contents: write
 
 jobs:
   test:
@@ -122,36 +116,17 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
-      - name: Checkout code with write permissions
+      - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Update image in deployment manifest
-        run: |
-          # Update the deployment manifest with the new image tag
-          sed -i "s|image:.*|image: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}|g" manifests/deployment.yaml
-          
-          # Commit the updated manifest
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add manifests/deployment.yaml
-          
-          # Only commit if there are changes
-          if ! git diff --staged --quiet; then
-            git commit -m "Update image to ${{ github.sha }}"
-            git push
-          else
-            echo "No changes to commit"
-          fi
-
-      # ... rest of your deploy steps remain the same
       - name: Set up Minikube
         run: |
+          # Install Minikube
           curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
           sudo install minikube-linux-amd64 /usr/local/bin/minikube
           rm minikube-linux-amd64
 
+          # Install kubectl
           curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
           sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
           rm kubectl
@@ -161,93 +136,60 @@ jobs:
           minikube start --driver=docker --memory=4096 --cpus=2
           minikube addons enable metrics-server
 
-      - name: Install ArgoCD
+      - name: Verify cluster
         run: |
-          kubectl create namespace ${{ env.ARGOCD_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
-          kubectl apply -n ${{ env.ARGOCD_NAMESPACE }} -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+          minikube status
+          kubectl cluster-info
+          kubectl get nodes
 
-      - name: Wait for ArgoCD to be ready
+      - name: Create namespace
         run: |
-          timeout 120 bash -c 'until kubectl get deployment argocd-server -n ${{ env.ARGOCD_NAMESPACE }} &>/dev/null; do sleep 5; done'
-          kubectl wait -n ${{ env.ARGOCD_NAMESPACE }} --for=condition=available deployment/argocd-server --timeout=600s
+          kubectl create namespace ${{ env.K8S_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
 
-      - name: Patch ArgoCD service to NodePort
+      - name: Update and apply Kubernetes manifests
         run: |
-          kubectl patch svc argocd-server -n ${{ env.ARGOCD_NAMESPACE }} \
-            -p '{"spec": {"type": "NodePort", "ports": [{"port": 443, "targetPort": 8080, "nodePort": 30080}]}}'
-
-      - name: Get ArgoCD admin password
-        run: |
-          until kubectl get secret -n ${{ env.ARGOCD_NAMESPACE }} argocd-initial-admin-secret &>/dev/null; do
-            echo "Waiting for ArgoCD secret..."
-            sleep 10
-          done
-          kubectl get secret -n ${{ env.ARGOCD_NAMESPACE }} argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d > /tmp/argocd-password
-          echo "ARGOCD_PASSWORD=$(cat /tmp/argocd-password)" >> $GITHUB_ENV
-
-      - name: Install ArgoCD CLI
-        run: |
-          curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
-          sudo install -m 555 argocd-linux-amd64 /usr/local/bin/argocd
-          rm argocd-linux-amd64
-
-      - name: Configure ArgoCD access
-        run: |
-          MINIKUBE_IP=$(minikube ip)
-          echo "ARGOCD_SERVER=$MINIKUBE_IP:30080" >> $GITHUB_ENV
-          for i in {1..30}; do
-            if curl -k -s https://$MINIKUBE_IP:30080 &>/dev/null; then
-              echo "ArgoCD server is ready!"
-              break
-            fi
-            echo "Waiting for ArgoCD server to be ready... ($i/30)"
-            sleep 10
-          done
-
-      - name: Login to ArgoCD
-        run: |
-          for i in {1..5}; do
-            if argocd login ${{ env.ARGOCD_SERVER }} \
-              --username admin \
-              --password ${{ env.ARGOCD_PASSWORD }} \
-              --insecure \
-              --grpc-web; then
-              echo "Successfully logged into ArgoCD"
-              break
-            fi
-            echo "Login attempt $i failed, retrying..."
-            sleep 10
-          done
-
-      - name: Create ArgoCD Application
-        run: |
-          if ! argocd app get ${{ env.IMAGE_NAME }} --grpc-web &>/dev/null; then
-            echo "Creating new ArgoCD application"
-            argocd app create ${{ env.IMAGE_NAME }} \
-              --repo https://github.com/${{ github.repository }}.git \
-              --path manifests \
-              --dest-server https://kubernetes.default.svc \
-              --dest-namespace ${{ env.K8S_NAMESPACE }} \
-              --sync-policy automated \
-              --auto-prune \
-              --self-heal \
-              --grpc-web
-          else
-            echo "ArgoCD application already exists"
-          fi
-
-      - name: Sync ArgoCD Application
-        run: |
-          argocd app sync ${{ env.IMAGE_NAME }} --grpc-web --retry-limit 5
-
-      - name: Wait for application rollout
-        run: |
-          argocd app wait ${{ env.IMAGE_NAME }} --health --timeout 600 --grpc-web
+          # Update the deployment manifest with the new image tag
+          sed -i "s|image:.*|image: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}|g" manifests/deployment.yaml
+          
+          # Apply the manifests directly to Kubernetes
+          echo "Applying Kubernetes manifests..."
+          kubectl apply -f manifests/ -n ${{ env.K8S_NAMESPACE }}
+          
+          # Wait for rollout to complete
+          echo "Waiting for deployment rollout..."
+          kubectl rollout status deployment/${{ env.IMAGE_NAME }} -n ${{ env.K8S_NAMESPACE }} --timeout=300s
 
       - name: Verify deployment
         run: |
-          kubectl get deployments,services,pods -n ${{ env.K8S_NAMESPACE }}
-          kubectl rollout status deployment/${{ env.IMAGE_NAME }} -n ${{ env.K8S_NAMESPACE }} --timeout=300s
+          echo "=== Deployment Details ==="
+          kubectl get deployment ${{ env.IMAGE_NAME }} -n ${{ env.K8S_NAMESPACE }} -o wide
+          
+          echo "=== Service Details ==="
+          kubectl get service ${{ env.IMAGE_NAME }}-service -n ${{ env.K8S_NAMESPACE }} -o wide
+          
+          echo "=== Pod Details ==="
+          kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=${{ env.IMAGE_NAME }}
+          
+          echo "=== Pod Logs ==="
+          kubectl logs -n ${{ env.K8S_NAMESPACE }} -l app=${{ env.IMAGE_NAME }} --tail=10
+
+      - name: Test application
+        run: |
+          # Get the service URL and test the application
+          MINIKUBE_IP=$(minikube ip)
+          SERVICE_PORT=$(kubectl get service ${{ env.IMAGE_NAME }}-service -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.spec.ports[0].nodePort}')
+          echo "Application URL: http://$MINIKUBE_IP:$SERVICE_PORT"
+          
+          # Wait for application to be ready and test
+          echo "Testing application endpoint..."
+          for i in {1..30}; do
+            if curl -s http://$MINIKUBE_IP:$SERVICE_PORT > /dev/null; then
+              echo "✅ Application is responding!"
+              break
+            fi
+            echo "Waiting for application to be ready... ($i/30)"
+            sleep 5
+          done
 
   notify:
     name: Notify Status
@@ -260,7 +202,8 @@ jobs:
         run: |
           if [ "${{ needs.test.result }}" == "success" ] && [ "${{ needs.deploy.result }}" == "success" ]; then
             echo "✅ CI/CD Pipeline completed successfully"
-            echo "Application deployed to Minikube with ArgoCD"
+            echo "Application deployed to Minikube"
+            echo "Image: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
           else
             echo "❌ CI/CD Pipeline failed"
             echo "Test job: ${{ needs.test.result }}"
