@@ -1,11 +1,11 @@
-name: Java Maven CI_CD
+name: Java Maven CI/CD
 
 on:
   push:
     branches:
       - main
-  path-ignore:
-      - 'manifest/**'
+    paths-ignore:
+      - 'manifests/**'
 
 env:
   IMAGE_NAME: java-maven-app
@@ -118,8 +118,10 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
-      - name: Checkout code
+      - name: Checkout code with write permissions
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Update image in deployment manifest
         run: |
