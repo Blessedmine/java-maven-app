@@ -1,17 +1,23 @@
-name: Java Maven CICD
+name: Java Maven CI/CD
 
 on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
 
 env:
   IMAGE_NAME: java-maven-app
-  JAVA_VERSION: 17
+  JAVA_VERSION: '17'
+  MAVEN_OPTS: '-Dmaven.repo.local=$HOME/.m2/repository'
+  K8S_NAMESPACE: 'default'
+  ARGOCD_NAMESPACE: 'argocd'
 
 jobs:
-  build:
-    name: Build & Test Java App
+  test:
+    name: Build & Test
     runs-on: ubuntu-latest
 
     steps:
@@ -26,21 +32,67 @@ jobs:
           cache: 'maven'
 
       - name: Build with Maven
-        run: mvn -B clean package
+        run: mvn -B clean compile
+
+      - name: Run Unit Tests
+        run: mvn -B test
+
+      - name: Run Integration Tests
+        run: mvn -B verify
+
+      - name: Security Scan with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: |
+            target/surefire-reports/
+            target/failsafe-reports/
+          retention-days: 7
+
+  build:
+    name: Build & Package
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: 'maven'
+
+      - name: Build Package
+        run: mvn -B clean package -DskipTests
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: java-app
           path: target/*.jar
+          retention-days: 7
 
   docker:
     name: Build & Push Docker Image
     runs-on: ubuntu-latest
     needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
-      - name: Checkout repo
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Download build artifact
@@ -49,91 +101,165 @@ jobs:
           name: java-app
           path: target
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Login to DockerHub
-        run: echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build Image
-        run: |
-          docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/java-maven-app:${{ github.sha }} \
-                       -t ${{ secrets.DOCKERHUB_USERNAME }}/java-maven-app:latest .
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=
+            type=ref,event=branch
+            latest
 
-      - name: Push Image
-        run: |
-          docker push ${{ secrets.DOCKERHUB_USERNAME }}/java-maven-app:${{ github.sha }}
-          docker push ${{ secrets.DOCKERHUB_USERNAME }}/java-maven-app:latest
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   deploy:
-    name: Deploy to Minikube & ArgoCD
+    name: Deploy to Minikube
     runs-on: ubuntu-latest
     needs: docker
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
-      - name: Checkout repo
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Minikube
+      - name: Install Minikube and kubectl
+        uses: medyagh/setup-minikube@v1
+        with:
+          minikube version: latest
+          kubernetes version: latest
+          driver: docker
+
+      - name: Start Minikube with resources
         run: |
-          curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
-          sudo install minikube-linux-amd64 /usr/local/bin/minikube
+          minikube start --driver=docker --memory=4096 --cpus=2
+          minikube addons enable metrics-server
 
-      - name: Start Minikube
-        run: minikube start --driver=docker
-
-      - name: Install kubectl
-        run: |
-          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          chmod +x kubectl
-          sudo mv kubectl /usr/local/bin/
-
-      - name: Configure kubectl
-        run: kubectl config use-context minikube
+      - name: Verify cluster
+        run: kubectl cluster-info && kubectl get nodes
 
       - name: Install ArgoCD
         run: |
-          kubectl create namespace argocd
-          kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+          kubectl create namespace ${{ env.ARGOCD_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+          kubectl apply -n ${{ env.ARGOCD_NAMESPACE }} -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 
       - name: Wait for ArgoCD
-        run: kubectl wait -n argocd deployment argocd-server --for=condition=Available --timeout=5m
-
-      - name: Get ArgoCD password
         run: |
-          pw=$(kubectl get secret argocd-initial-admin-secret -n argocd -o jsonpath="{.data.password}" | base64 -d)
-          echo "ARGOCD_PASSWORD=$pw" >> $GITHUB_ENV
+          kubectl wait -n ${{ env.ARGOCD_NAMESPACE }} --for=condition=available deployment/argocd-server --timeout=600s
+          kubectl wait -n ${{ env.ARGOCD_NAMESPACE }} --for=condition=ready pod -l app.kubernetes.io/name=argocd-server --timeout=300s
+
+      - name: Patch ArgoCD service
+        run: |
+          kubectl patch svc argocd-server -n ${{ env.ARGOCD_NAMESPACE }} \
+            -p '{"spec": {"type": "NodePort", "ports": [{"port": 443, "targetPort": 8080, "nodePort": 30080}]}}'
+
+      - name: Get ArgoCD admin password
+        id: argocd-password
+        run: |
+          until kubectl get secret -n ${{ env.ARGOCD_NAMESPACE }} argocd-initial-admin-secret -o jsonpath='{.data.password}' 2>/dev/null; do
+            echo "Waiting for ArgoCD secret..."
+            sleep 5
+          done
+          echo "ARGOCD_PASSWORD=$(kubectl get secret -n ${{ env.ARGOCD_NAMESPACE }} argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d)" >> $GITHUB_ENV
 
       - name: Install ArgoCD CLI
         run: |
-          curl -sSL -o argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
-          chmod +x argocd
-          sudo mv argocd /usr/local/bin/
+          curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          sudo install -m 555 argocd-linux-amd64 /usr/local/bin/argocd
+          rm argocd-linux-amd64
 
-      - name: Patch ArgoCD service (correct version)
+      - name: Configure ArgoCD access
         run: |
-          kubectl patch svc argocd-server -n argocd \
-            -p '{"spec": {"type": "NodePort", "ports": [{"name":"https","port":443,"targetPort":8080,"nodePort":30080}]}}'
+          MINIKUBE_IP=$(minikube ip)
+          echo "ARGOCD_SERVER=$MINIKUBE_IP:30080" >> $GITHUB_ENV
+          
+          # Wait for ArgoCD to be reachable
+          until curl -k -s https://$MINIKUBE_IP:30080 2>&1 | grep -q "Argo CD"; do
+            echo "Waiting for ArgoCD server to be ready..."
+            sleep 10
+          done
 
-      - name: Set ArgoCD Server URL
-        run: echo "ARGOCD_SERVER=$(minikube ip):30080" >> $GITHUB_ENV
-
-      - name: Login to ArgoCD (correct syntax)
+      - name: Login to ArgoCD
         run: |
-          argocd login $ARGOCD_SERVER \
+          argocd login ${{ env.ARGOCD_SERVER }} \
             --username admin \
-            --password $ARGOCD_PASSWORD \
+            --password ${{ env.ARGOCD_PASSWORD }} \
             --insecure \
             --grpc-web
 
-      - name: Update Deployment Manifest
+      - name: Create or Update ArgoCD Application
         run: |
-          sed -i "s|image:.*|image: ${{ secrets.DOCKERHUB_USERNAME }}/java-maven-app:${{ github.sha }}|g" manifest/deployment.yaml
+          # Check if app exists
+          if argocd app get ${{ env.IMAGE_NAME }} --grpc-web &>/dev/null; then
+            echo "Updating existing ArgoCD application"
+            argocd app set ${{ env.IMAGE_NAME }} \
+              --repo https://github.com/${{ github.repository }} \
+              --path manifests \
+              --dest-server https://kubernetes.default.svc \
+              --dest-namespace ${{ env.K8S_NAMESPACE }} \
+              --sync-policy automated \
+              --auto-prune \
+              --self-heal \
+              --grpc-web
+          else
+            echo "Creating new ArgoCD application"
+            argocd app create ${{ env.IMAGE_NAME }} \
+              --repo https://github.com/${{ github.repository }} \
+              --path manifests \
+              --dest-server https://kubernetes.default.svc \
+              --dest-namespace ${{ env.K8S_NAMESPACE }} \
+              --sync-policy automated \
+              --auto-prune \
+              --self-heal \
+              --grpc-web
+          fi
 
-          git config user.name "${{ secrets.GIT_USERNAME }}"
-          git config user.email "${{ secrets.GIT_EMAIL }}"
+      - name: Sync ArgoCD Application
+        run: |
+          argocd app sync ${{ env.IMAGE_NAME }} --grpc-web --retry-limit 5
 
-          git add manifest/deployment.yaml
-          git commit -m "CI: Update image to ${{ github.sha }}" || echo "No changes"
+      - name: Wait for application rollout
+        run: |
+          argocd app wait ${{ env.IMAGE_NAME }} --health --timeout 600 --grpc-web
 
-          git push origin main
+      - name: Verify deployment
+        run: |
+          kubectl get deployments -n ${{ env.K8S_NAMESPACE }}
+          kubectl rollout status deployment/${{ env.IMAGE_NAME }} -n ${{ env.K8S_NAMESPACE }} --timeout=300s
 
-      - name: Sync ArgoCD App
-        run: argocd app sync java-maven-app --grpc-web
+  notify:
+    name: Notify Status
+    runs-on: ubuntu-latest
+    needs: [test, build, docker, deploy]
+    if: always()
+
+    steps:
+      - name: Notify workflow status
+        run: |
+          if [ "${{ needs.test.result }}" == "success" ] && [ "${{ needs.deploy.result }}" == "success" ]; then
+            echo "✅ CI/CD Pipeline completed successfully"
+          else
+            echo "❌ CI/CD Pipeline failed - Check job results"
+            echo "Test: ${{ needs.test.result }}"
+            echo "Build: ${{ needs.build.result }}"
+            echo "Docker: ${{ needs.docker.result }}"
+            echo "Deploy: ${{ needs.deploy.result }}"
+          fi
