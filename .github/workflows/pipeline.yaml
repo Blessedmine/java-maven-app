@@ -127,7 +127,7 @@ jobs:
 
   deploy:
     name: Deploy to Minikube
-    runs-on: ubuntu-22.04  # Changed to Ubuntu 22.04 for better compatibility
+    runs-on: ubuntu-latest
     needs: docker
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
@@ -135,49 +135,23 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Docker and dependencies
+      - name: Set up Minikube
         run: |
-          sudo apt-get update
-          # Install Docker without containerd.io to avoid conflicts
-          sudo apt-get install -y \
-            docker.io \
-            curl \
-            apt-transport-https \
-            ca-certificates \
-            gnupg
-
-          # Start and enable Docker
-          sudo systemctl start docker
-          sudo systemctl enable docker
-
-          # Add user to docker group
-          sudo usermod -aG docker $USER
-          newgrp docker
-
-      - name: Install Minikube
-        run: |
+          # Install Minikube
           curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
           sudo install minikube-linux-amd64 /usr/local/bin/minikube
           rm minikube-linux-amd64
 
-      - name: Install kubectl
-        run: |
+          # Install kubectl
           curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
           sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
           rm kubectl
 
-      - name: Start Minikube cluster
+      - name: Start Minikube with Docker driver
         run: |
-          # Use sudo for minikube to avoid permission issues
-          sudo minikube start --driver=docker --memory=4096 --cpus=2
-          sudo minikube addons enable metrics-server
-
-      - name: Configure kubectl access
-        run: |
-          # Copy kubeconfig to user directory
-          sudo cp -r /root/.kube /home/runner/
-          sudo chown -R runner:runner /home/runner/.kube
-          export KUBECONFIG=/home/runner/.kube/config
+          # Start Minikube using the pre-installed Docker
+          minikube start --driver=docker --memory=4096 --cpus=2
+          minikube addons enable metrics-server
 
       - name: Verify cluster
         run: |
@@ -192,9 +166,7 @@ jobs:
 
       - name: Wait for ArgoCD
         run: |
-          # Wait for ArgoCD deployments to be created
-          timeout 120 bash -c 'until kubectl get deployment argocd-server -n ${{ env.ARGOCD_NAMESPACE }} &>/dev/null; do sleep 5; done'
-          # Wait for deployments to be available
+          # Wait for ArgoCD to be ready
           kubectl wait -n ${{ env.ARGOCD_NAMESPACE }} --for=condition=available deployment/argocd-server --timeout=600s
           kubectl wait -n ${{ env.ARGOCD_NAMESPACE }} --for=condition=ready pod -l app.kubernetes.io/name=argocd-server --timeout=300s
 
@@ -210,7 +182,7 @@ jobs:
             echo "Waiting for ArgoCD secret..."
             sleep 10
           done
-          # Get the password and set as environment variable
+          # Get the password
           kubectl get secret -n ${{ env.ARGOCD_NAMESPACE }} argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d > /tmp/argocd-password
           echo "ARGOCD_PASSWORD=$(cat /tmp/argocd-password)" >> $GITHUB_ENV
 
@@ -244,8 +216,7 @@ jobs:
               --username admin \
               --password ${{ env.ARGOCD_PASSWORD }} \
               --insecure \
-              --grpc-web \
-              --skip-test-tls; then
+              --grpc-web; then
               echo "Successfully logged into ArgoCD"
               break
             fi
@@ -253,21 +224,10 @@ jobs:
             sleep 10
           done
 
-      - name: Create or Update ArgoCD Application
+      - name: Create ArgoCD Application
         run: |
-          # Check if app exists
-          if argocd app get ${{ env.IMAGE_NAME }} --grpc-web &>/dev/null; then
-            echo "Updating existing ArgoCD application"
-            argocd app set ${{ env.IMAGE_NAME }} \
-              --repo https://github.com/${{ github.repository }} \
-              --path manifests \
-              --dest-server https://kubernetes.default.svc \
-              --dest-namespace ${{ env.K8S_NAMESPACE }} \
-              --sync-policy automated \
-              --auto-prune \
-              --self-heal \
-              --grpc-web
-          else
+          # Check if app exists, if not create it
+          if ! argocd app get ${{ env.IMAGE_NAME }} --grpc-web &>/dev/null; then
             echo "Creating new ArgoCD application"
             argocd app create ${{ env.IMAGE_NAME }} \
               --repo https://github.com/${{ github.repository }} \
@@ -278,7 +238,21 @@ jobs:
               --auto-prune \
               --self-heal \
               --grpc-web
+          else
+            echo "ArgoCD application already exists"
           fi
+
+      - name: Update image in deployment manifest
+        run: |
+          # Update the deployment manifest with the new image
+          sed -i "s|image:.*|image: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}|g" manifests/deployment.yaml
+          
+          # Commit and push the changes
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add manifests/deployment.yaml
+          git commit -m "Update image to ${{ github.sha }}" || echo "No changes to commit"
+          git push
 
       - name: Sync ArgoCD Application
         run: |
@@ -291,6 +265,7 @@ jobs:
       - name: Verify deployment
         run: |
           kubectl get deployments,services,pods -n ${{ env.K8S_NAMESPACE }}
+          kubectl rollout status deployment/${{ env.IMAGE_NAME }} -n ${{ env.K8S_NAMESPACE }} --timeout=300s
 
   notify:
     name: Notify Status
@@ -301,7 +276,13 @@ jobs:
     steps:
       - name: Workflow Status
         run: |
-          echo "Test Job: ${{ needs.test.result }}"
-          echo "Build Job: ${{ needs.build.result }}"
-          echo "Docker Job: ${{ needs.docker.result }}"
-          echo "Deploy Job: ${{ needs.deploy.result }}"
+          if [ "${{ needs.test.result }}" == "success" ] && [ "${{ needs.deploy.result }}" == "success" ]; then
+            echo "✅ CI/CD Pipeline completed successfully"
+          else
+            echo "❌ CI/CD Pipeline failed"
+            echo "Test: ${{ needs.test.result }}"
+            echo "Build: ${{ needs.build.result }}"
+            echo "Docker: ${{ needs.docker.result }}"
+            echo "Deploy: ${{ needs.deploy.result }}"
+            exit 1
+          fi
