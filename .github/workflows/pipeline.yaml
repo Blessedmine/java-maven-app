@@ -1,4 +1,4 @@
-name: Java Maven CI/CD
+name: Java Maven CI_CD
 
 on:
   push:
@@ -7,6 +7,8 @@ on:
   pull_request:
     branches:
       - main
+  paths-ignore:
+    - 'manifest/**'
 
 env:
   IMAGE_NAME: java-maven-app
@@ -47,6 +49,16 @@ jobs:
           scan-ref: '.'
           format: 'sarif'
           output: 'trivy-results.sarif'
+
+      - name: Upload Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: |
+            target/surefire-reports/
+            target/failsafe-reports/
+          retention-days: 7
 
   build:
     name: Build & Package
@@ -111,6 +123,9 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
 
   deploy:
     name: Deploy to Minikube
@@ -121,16 +136,15 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create and commit Kubernetes manifests
+      - name: Create Kubernetes manifests if they don't exist
         run: |
           # Create manifests directory if it doesn't exist
           mkdir -p manifests
           
-          # Create deployment.yaml
-          cat > manifests/deployment.yaml << EOF
+          # Create deployment.yaml if it doesn't exist
+          if [ ! -f manifests/deployment.yaml ]; then
+            cat > manifests/deployment.yaml << EOF
           apiVersion: apps/v1
           kind: Deployment
           metadata:
@@ -160,10 +174,24 @@ jobs:
                     limits:
                       memory: "512Mi"
                       cpu: "500m"
+                  livenessProbe:
+                    httpGet:
+                      path: /actuator/health
+                      port: 8080
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                  readinessProbe:
+                    httpGet:
+                      path: /actuator/health
+                      port: 8080
+                    initialDelaySeconds: 5
+                    periodSeconds: 5
           EOF
+          fi
 
-          # Create service.yaml
-          cat > manifests/service.yaml << EOF
+          # Create service.yaml if it doesn't exist
+          if [ ! -f manifests/service.yaml ]; then
+            cat > manifests/service.yaml << EOF
           apiVersion: v1
           kind: Service
           metadata:
@@ -177,13 +205,21 @@ jobs:
               targetPort: 8080
             type: ClusterIP
           EOF
+          fi
 
-          # Commit the manifests if they are new or changed
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add manifests/
-          git diff --staged --quiet || git commit -m "Add Kubernetes manifests for ArgoCD"
-          git push
+          # Create kustomization.yaml if it doesn't exist
+          if [ ! -f manifests/kustomization.yaml ]; then
+            cat > manifests/kustomization.yaml << EOF
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+          resources:
+          - deployment.yaml
+          - service.yaml
+          EOF
+          fi
+
+          # Show created files
+          ls -la manifests/
 
       - name: Set up Minikube
         run: |
@@ -199,6 +235,7 @@ jobs:
 
       - name: Start Minikube with Docker driver
         run: |
+          # Start Minikube using the pre-installed Docker
           minikube start --driver=docker --memory=4096 --cpus=2
           minikube addons enable metrics-server
 
@@ -219,7 +256,9 @@ jobs:
 
       - name: Wait for ArgoCD
         run: |
+          # Wait for ArgoCD to be ready
           kubectl wait -n ${{ env.ARGOCD_NAMESPACE }} --for=condition=available deployment/argocd-server --timeout=600s
+          kubectl wait -n ${{ env.ARGOCD_NAMESPACE }} --for=condition=ready pod -l app.kubernetes.io/name=argocd-server --timeout=300s
 
       - name: Patch ArgoCD service
         run: |
@@ -228,10 +267,12 @@ jobs:
 
       - name: Get ArgoCD admin password
         run: |
+          # Wait for the secret to be created
           until kubectl get secret -n ${{ env.ARGOCD_NAMESPACE }} argocd-initial-admin-secret &>/dev/null; do
             echo "Waiting for ArgoCD secret..."
             sleep 10
           done
+          # Get the password
           kubectl get secret -n ${{ env.ARGOCD_NAMESPACE }} argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d > /tmp/argocd-password
           echo "ARGOCD_PASSWORD=$(cat /tmp/argocd-password)" >> $GITHUB_ENV
 
@@ -245,6 +286,7 @@ jobs:
         run: |
           MINIKUBE_IP=$(minikube ip)
           echo "ARGOCD_SERVER=$MINIKUBE_IP:30080" >> $GITHUB_ENV
+          echo "ArgoCD Server: $MINIKUBE_IP:30080"
           
           # Wait for ArgoCD to be reachable
           for i in {1..30}; do
@@ -258,6 +300,7 @@ jobs:
 
       - name: Login to ArgoCD
         run: |
+          # Retry login in case server isn't fully ready
           for i in {1..5}; do
             if argocd login ${{ env.ARGOCD_SERVER }} \
               --username admin \
@@ -273,13 +316,11 @@ jobs:
 
       - name: Create ArgoCD Application
         run: |
-          # Use the current repository URL
-          REPO_URL="https://github.com/${{ github.repository }}.git"
-          
+          # Check if app exists, if not create it
           if ! argocd app get ${{ env.IMAGE_NAME }} --grpc-web &>/dev/null; then
             echo "Creating new ArgoCD application"
             argocd app create ${{ env.IMAGE_NAME }} \
-              --repo $REPO_URL \
+              --repo https://github.com/${{ github.repository }} \
               --path manifests \
               --dest-server https://kubernetes.default.svc \
               --dest-namespace ${{ env.K8S_NAMESPACE }} \
@@ -302,6 +343,7 @@ jobs:
       - name: Verify deployment
         run: |
           kubectl get deployments,services,pods -n ${{ env.K8S_NAMESPACE }}
+          kubectl rollout status deployment/${{ env.IMAGE_NAME }} -n ${{ env.K8S_NAMESPACE }} --timeout=300s
 
   notify:
     name: Notify Status
