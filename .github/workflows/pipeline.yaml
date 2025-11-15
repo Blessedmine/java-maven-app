@@ -135,6 +135,90 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Create Kubernetes manifests if they don't exist
+        run: |
+          # Create manifests directory if it doesn't exist
+          mkdir -p manifests
+          
+          # Create deployment.yaml if it doesn't exist
+          if [ ! -f manifests/deployment.yaml ]; then
+            cat > manifests/deployment.yaml << EOF
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: ${{ env.IMAGE_NAME }}
+            namespace: ${{ env.K8S_NAMESPACE }}
+            labels:
+              app: ${{ env.IMAGE_NAME }}
+          spec:
+            replicas: 2
+            selector:
+              matchLabels:
+                app: ${{ env.IMAGE_NAME }}
+            template:
+              metadata:
+                labels:
+                  app: ${{ env.IMAGE_NAME }}
+              spec:
+                containers:
+                - name: ${{ env.IMAGE_NAME }}
+                  image: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+                  ports:
+                  - containerPort: 8080
+                  resources:
+                    requests:
+                      memory: "256Mi"
+                      cpu: "250m"
+                    limits:
+                      memory: "512Mi"
+                      cpu: "500m"
+                  livenessProbe:
+                    httpGet:
+                      path: /actuator/health
+                      port: 8080
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                  readinessProbe:
+                    httpGet:
+                      path: /actuator/health
+                      port: 8080
+                    initialDelaySeconds: 5
+                    periodSeconds: 5
+          EOF
+          fi
+
+          # Create service.yaml if it doesn't exist
+          if [ ! -f manifests/service.yaml ]; then
+            cat > manifests/service.yaml << EOF
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: ${{ env.IMAGE_NAME }}-service
+            namespace: ${{ env.K8S_NAMESPACE }}
+          spec:
+            selector:
+              app: ${{ env.IMAGE_NAME }}
+            ports:
+            - port: 80
+              targetPort: 8080
+            type: ClusterIP
+          EOF
+          fi
+
+          # Create kustomization.yaml if it doesn't exist
+          if [ ! -f manifests/kustomization.yaml ]; then
+            cat > manifests/kustomization.yaml << EOF
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+          resources:
+          - deployment.yaml
+          - service.yaml
+          EOF
+          fi
+
+          # Show created files
+          ls -la manifests/
+
       - name: Set up Minikube
         run: |
           # Install Minikube
@@ -158,6 +242,10 @@ jobs:
           minikube status
           kubectl cluster-info
           kubectl get nodes
+
+      - name: Create namespace
+        run: |
+          kubectl create namespace ${{ env.K8S_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Install ArgoCD
         run: |
@@ -241,18 +329,6 @@ jobs:
           else
             echo "ArgoCD application already exists"
           fi
-
-      - name: Update image in deployment manifest
-        run: |
-          # Update the deployment manifest with the new image
-          sed -i "s|image:.*|image: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}|g" manifests/deployment.yaml
-          
-          # Commit and push the changes
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-          git add manifests/deployment.yaml
-          git commit -m "Update image to ${{ github.sha }}" || echo "No changes to commit"
-          git push
 
       - name: Sync ArgoCD Application
         run: |

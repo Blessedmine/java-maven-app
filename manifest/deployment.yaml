@@ -2,11 +2,11 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: java-maven-app
-  namespace: java-maven-app
+  namespace: default
   labels:
     app: java-maven-app
 spec:
-  replicas: 3
+  replicas: 2
   selector:
     matchLabels:
       app: java-maven-app
@@ -17,9 +17,9 @@ spec:
     spec:
       containers:
         - name: java-maven-app
-          image: blessedmine/java-maven-app:dd43f4858bb53b94684217f9cb7ab73c431c0ead
+          image: blessedmine/java-maven-app:latest
           ports:
-            - containerPort: 80
+            - containerPort: 8080
           resources:
             limits:
               cpu: 500m
