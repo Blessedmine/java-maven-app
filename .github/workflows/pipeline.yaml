@@ -47,6 +47,7 @@ jobs:
           format: 'sarif'
           output: 'trivy-results.sarif'
 
+
   build:
     name: Build & Package
     runs-on: ubuntu-latest
@@ -73,6 +74,7 @@ jobs:
           name: java-app
           path: target/*.jar
           retention-days: 7
+
 
   docker:
     name: Build & Push Docker Image
@@ -110,6 +112,7 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
 
   deploy:
     name: Deploy to Minikube
@@ -275,6 +278,7 @@ jobs:
           
           echo "=== Checking rollout status ==="
           kubectl rollout status deployment/${{ env.IMAGE_NAME }} -n ${{ env.K8S_NAMESPACE }} --timeout=300s
+ 
 
   notify:
     name: Notify Status
