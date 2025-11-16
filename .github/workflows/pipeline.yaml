@@ -110,7 +110,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   deploy:
-    name: Deploy to Minikube
+    name: Deploy to Minikube with ArgoCD
     runs-on: ubuntu-latest
     needs: docker
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -142,54 +142,175 @@ jobs:
           kubectl cluster-info
           kubectl get nodes
 
-      - name: Create namespace
+      - name: Create namespaces
         run: |
           kubectl create namespace ${{ env.K8S_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create namespace ${{ env.ARGOCD_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
 
-      - name: Update and apply Kubernetes manifests
+      - name: Install ArgoCD
+        run: |
+          kubectl apply -n ${{ env.ARGOCD_NAMESPACE }} -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+      - name: Wait for ArgoCD to be ready
+        run: |
+          # Wait for ArgoCD deployments to be created
+          echo "Waiting for ArgoCD deployments..."
+          timeout 180 bash -c 'until kubectl get deployment argocd-server -n ${{ env.ARGOCD_NAMESPACE }} &>/dev/null; do sleep 5; done'
+          
+          # Wait for deployments to be available
+          echo "Waiting for ArgoCD server to be available..."
+          kubectl wait -n ${{ env.ARGOCD_NAMESPACE }} --for=condition=available deployment/argocd-server --timeout=600s
+          
+          # Wait for other key ArgoCD components
+          kubectl wait -n ${{ env.ARGOCD_NAMESPACE }} --for=condition=available deployment/argocd-repo-server --timeout=300s
+          kubectl wait -n ${{ env.ARGOCD_NAMESPACE }} --for=condition=available deployment/argocd-applicationset-controller --timeout=300s
+
+      - name: Patch ArgoCD service to NodePort
+        run: |
+          kubectl patch svc argocd-server -n ${{ env.ARGOCD_NAMESPACE }} \
+            -p '{"spec": {"type": "NodePort", "ports": [{"port": 443, "targetPort": 8080, "nodePort": 30080}]}}'
+
+      - name: Get ArgoCD admin password
+        run: |
+          # Wait for the secret to be created
+          echo "Waiting for ArgoCD admin secret..."
+          until kubectl get secret -n ${{ env.ARGOCD_NAMESPACE }} argocd-initial-admin-secret &>/dev/null; do
+            echo "Waiting for ArgoCD secret..."
+            sleep 10
+          done
+          
+          # Get the password and set as environment variable
+          kubectl get secret -n ${{ env.ARGOCD_NAMESPACE }} argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d > /tmp/argocd-password
+          echo "ARGOCD_PASSWORD=$(cat /tmp/argocd-password)" >> $GITHUB_ENV
+          echo "ArgoCD password retrieved successfully"
+
+      - name: Install ArgoCD CLI
+        run: |
+          curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          sudo install -m 555 argocd-linux-amd64 /usr/local/bin/argocd
+          rm argocd-linux-amd64
+          echo "ArgoCD CLI installed successfully"
+
+      - name: Configure ArgoCD access
+        run: |
+          MINIKUBE_IP=$(minikube ip)
+          echo "ARGOCD_SERVER=$MINIKUBE_IP:30080" >> $GITHUB_ENV
+          echo "ArgoCD Server URL: https://$MINIKUBE_IP:30080"
+          
+          # Wait for ArgoCD to be reachable
+          echo "Waiting for ArgoCD server to be reachable..."
+          for i in {1..30}; do
+            if curl -k -s https://$MINIKUBE_IP:30080 &>/dev/null; then
+              echo "✅ ArgoCD server is ready!"
+              break
+            fi
+            echo "Waiting for ArgoCD server to be ready... ($i/30)"
+            sleep 10
+          done
+
+      - name: Login to ArgoCD
+        run: |
+          # Retry login in case server isn't fully ready
+          echo "Logging into ArgoCD..."
+          for i in {1..10}; do
+            if argocd login ${{ env.ARGOCD_SERVER }} \
+              --username admin \
+              --password ${{ env.ARGOCD_PASSWORD }} \
+              --insecure \
+              --grpc-web; then
+              echo "✅ Successfully logged into ArgoCD"
+              break
+            fi
+            echo "Login attempt $i failed, retrying..."
+            sleep 10
+          done
+
+      - name: Update deployment manifest for ArgoCD
         run: |
           # Update the deployment manifest with the new image tag
           sed -i "s|image:.*|image: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}|g" manifests/deployment.yaml
+          echo "Updated deployment manifest with new image tag"
+
+      - name: Create ArgoCD Application
+        run: |
+          # Check if app exists, if not create it
+          if ! argocd app get ${{ env.IMAGE_NAME }} --grpc-web &>/dev/null; then
+            echo "Creating new ArgoCD application..."
+            argocd app create ${{ env.IMAGE_NAME }} \
+              --repo https://github.com/${{ github.repository }}.git \
+              --path manifests \
+              --dest-server https://kubernetes.default.svc \
+              --dest-namespace ${{ env.K8S_NAMESPACE }} \
+              --sync-policy automated \
+              --auto-prune \
+              --self-heal \
+              --grpc-web
+            echo "✅ ArgoCD application created"
+          else
+            echo "ArgoCD application already exists, updating..."
+            # Update the application if it exists
+            argocd app set ${{ env.IMAGE_NAME }} \
+              --repo https://github.com/${{ github.repository }}.git \
+              --path manifests \
+              --dest-server https://kubernetes.default.svc \
+              --dest-namespace ${{ env.K8S_NAMESPACE }} \
+              --sync-policy automated \
+              --auto-prune \
+              --self-heal \
+              --grpc-web
+            echo "✅ ArgoCD application updated"
+          fi
+
+      - name: Sync ArgoCD Application
+        run: |
+          echo "Syncing ArgoCD application..."
+          argocd app sync ${{ env.IMAGE_NAME }} --grpc-web --retry-limit 5
+          echo "✅ ArgoCD application sync completed"
+
+      - name: Wait for application rollout via ArgoCD
+        run: |
+          echo "Waiting for application to be healthy..."
+          argocd app wait ${{ env.IMAGE_NAME }} --health --timeout 600 --grpc-web
+          echo "✅ Application is healthy"
+
+      - name: Verify deployment through ArgoCD
+        run: |
+          echo "=== ArgoCD Application Status ==="
+          argocd app get ${{ env.IMAGE_NAME }} --grpc-web
           
-          # Apply the manifests directly to Kubernetes
-          echo "Applying Kubernetes manifests..."
-          kubectl apply -f manifests/ -n ${{ env.K8S_NAMESPACE }}
+          echo "=== Kubernetes Resources ==="
+          kubectl get deployments,services,pods -n ${{ env.K8S_NAMESPACE }}
           
-          # Wait for rollout to complete
-          echo "Waiting for deployment rollout..."
+          echo "=== Deployment Status ==="
           kubectl rollout status deployment/${{ env.IMAGE_NAME }} -n ${{ env.K8S_NAMESPACE }} --timeout=300s
 
-      - name: Verify deployment
-        run: |
-          echo "=== Deployment Details ==="
-          kubectl get deployment ${{ env.IMAGE_NAME }} -n ${{ env.K8S_NAMESPACE }} -o wide
-          
-          echo "=== Service Details ==="
-          kubectl get service ${{ env.IMAGE_NAME }}-service -n ${{ env.K8S_NAMESPACE }} -o wide
-          
-          echo "=== Pod Details ==="
-          kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=${{ env.IMAGE_NAME }}
-          
-          echo "=== Pod Logs ==="
-          kubectl logs -n ${{ env.K8S_NAMESPACE }} -l app=${{ env.IMAGE_NAME }} --tail=10
-
-      - name: Test application
+      - name: Test application endpoint
         run: |
           # Get the service URL and test the application
           MINIKUBE_IP=$(minikube ip)
-          SERVICE_PORT=$(kubectl get service ${{ env.IMAGE_NAME }}-service -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.spec.ports[0].nodePort}')
+          SERVICE_PORT=$(kubectl get service ${{ env.IMAGE_NAME }}-service -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null || echo "80")
           echo "Application URL: http://$MINIKUBE_IP:$SERVICE_PORT"
           
           # Wait for application to be ready and test
           echo "Testing application endpoint..."
           for i in {1..30}; do
-            if curl -s http://$MINIKUBE_IP:$SERVICE_PORT > /dev/null; then
+            if curl -f -s http://$MINIKUBE_IP:$SERVICE_PORT > /dev/null; then
               echo "✅ Application is responding!"
+              curl -s http://$MINIKUBE_IP:$SERVICE_PORT | head -c 100
               break
             fi
             echo "Waiting for application to be ready... ($i/30)"
             sleep 5
           done
+
+      - name: Display ArgoCD UI Access Info
+        run: |
+          MINIKUBE_IP=$(minikube ip)
+          echo "🎯 ArgoCD UI Access Information:"
+          echo "📱 URL: https://$MINIKUBE_IP:30080"
+          echo "👤 Username: admin"
+          echo "🔑 Password: ${{ env.ARGOCD_PASSWORD }}"
+          echo "💡 Use 'kubectl port-forward svc/argocd-server -n argocd 8080:443' for local access"
 
   notify:
     name: Notify Status
@@ -202,8 +323,9 @@ jobs:
         run: |
           if [ "${{ needs.test.result }}" == "success" ] && [ "${{ needs.deploy.result }}" == "success" ]; then
             echo "✅ CI/CD Pipeline completed successfully"
-            echo "Application deployed to Minikube"
-            echo "Image: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+            echo "🚀 Application deployed to Minikube with ArgoCD"
+            echo "🐳 Image: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+            echo "📊 ArgoCD is managing the deployment"
           else
             echo "❌ CI/CD Pipeline failed"
             echo "Test job: ${{ needs.test.result }}"
