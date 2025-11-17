@@ -1,4 +1,4 @@
-name: Java Maven CI/CD
+name: Java Maven CI_CD
 
 on:
   push:
@@ -45,6 +45,7 @@ jobs:
           format: 'sarif'
           output: 'trivy-results.sarif'
 
+
   build:
     name: Build & Package
     runs-on: ubuntu-latest
@@ -71,6 +72,7 @@ jobs:
           name: java-app
           path: target/*.jar
           retention-days: 7
+
 
   docker:
     name: Build & Push Docker Image
